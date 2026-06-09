@@ -3,7 +3,23 @@
   "displayName": "Codex Finish Notifier",
   "description": "Play a gentle sound and flash VS Code when Codex work finishes.",
   "version": "0.0.1",
-  "publisher": "local-dev",
+  "publisher": "dankh917",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Dankh917/VSC-CODEX-NOTIFIER.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Dankh917/VSC-CODEX-NOTIFIER/issues"
+  },
+  "homepage": "https://github.com/Dankh917/VSC-CODEX-NOTIFIER#readme",
+  "keywords": [
+    "codex",
+    "openai",
+    "notification",
+    "alert",
+    "sound"
+  ],
   "engines": {
     "vscode": "^1.96.2"
   },
@@ -12,7 +28,6 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "onUri",
     "onCommand:codexFinishNotifier.notifyDone",
     "onCommand:codexFinishNotifier.testAlert",
     "onCommand:codexFinishNotifier.dismissAlert",
@@ -97,6 +112,32 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically alert when a matching terminal command ends. Requires VS Code terminal shell integration."
+        },
+        "codexFinishNotifier.detectCodexProcess": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically alert when a short-lived Codex process exits. Off by default because the OpenAI Codex extension app-server is long-lived and not one process per turn."
+        },
+        "codexFinishNotifier.detectOpenAiCodexLog": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically alert when the OpenAI Codex extension reports that a turn has completed."
+        },
+        "codexFinishNotifier.openAiCodexDetectionMode": {
+          "type": "string",
+          "enum": [
+            "chatHeuristic",
+            "conservative"
+          ],
+          "default": "chatHeuristic",
+          "description": "How to detect OpenAI Codex extension completion. chatHeuristic also catches chat-only turns by waiting for stream activity and read state to settle; conservative only uses stronger local completion markers."
+        },
+        "codexFinishNotifier.processPollIntervalMs": {
+          "type": "number",
+          "default": 500,
+          "minimum": 500,
+          "maximum": 10000,
+          "description": "How often to check for Codex process start and exit."
         },
         "codexFinishNotifier.notifyWhenWindowFocused": {
           "type": "boolean",

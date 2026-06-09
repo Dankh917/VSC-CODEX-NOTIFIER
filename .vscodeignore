@@ -1,6 +1,7 @@
 node_modules
 src
 .vscode
+.gitignore
 .codex
 *.vsix
 tsconfig.json

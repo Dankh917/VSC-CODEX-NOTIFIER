@@ -5,11 +5,11 @@ VS Code extension that plays a gentle completion sound and shows a compact CLI-s
 ## What Works Automatically
 
 - Detects `codex` CLI commands in terminals when VS Code shell integration is active.
-- Handles Codex `Stop` hooks by watching `.codex/last-notify.log`, with `vscode://local-dev.codex-finish-notifier/done` kept as a fallback for repo-local Codex turns.
+- Detects Codex work from the OpenAI Codex VS Code extension using local completion markers, plus a guarded chat-stream fallback for chat-only turns.
 - Plays the bundled notification MP3 when the command ends.
 - Blinks a green `>>> CODEX DONE <<<` style status bar banner until you focus/interact with VS Code or dismiss it.
 
-The OpenAI Codex VS Code extension does not expose a public VS Code extension API event for "turn completed". This repo includes a `.codex/hooks.json` `Stop` hook that writes `.codex/last-notify.log`; the extension watches that file and runs the same alert path as the test command. Codex may ask you to review and trust that hook once with `/hooks`.
+The OpenAI Codex VS Code extension does not expose a public VS Code extension API event for "turn completed", so this extension watches local VS Code extension-host output from the OpenAI Codex extension. Strong completion markers are used when available; chat-only turns fall back to a guarded stream/read-state settled check.
 
 ## Commands
 
@@ -27,6 +27,10 @@ The OpenAI Codex VS Code extension does not expose a public VS Code extension AP
 - `codexFinishNotifier.flashIntervalMs`: pulse speed. Default is `900`; larger values blink slower.
 - `codexFinishNotifier.maxFlashSeconds`: optional safety timeout. `0` or `1` keeps the alert active until interaction or dismissal.
 - `codexFinishNotifier.detectTerminalCodex`: detect terminal Codex CLI completion.
+- `codexFinishNotifier.detectOpenAiCodexLog`: detect Codex completion from the OpenAI Codex extension's local turn-state output.
+- `codexFinishNotifier.openAiCodexDetectionMode`: `chatHeuristic` catches chat-only turns after stream/read-state activity settles; `conservative` only uses stronger local completion markers.
+- `codexFinishNotifier.detectCodexProcess`: detect completion by watching short-lived Codex process exit. Off by default because the OpenAI Codex extension app-server is long-lived.
+- `codexFinishNotifier.processPollIntervalMs`: how often to check Codex process state.
 - `codexFinishNotifier.terminalCommandPattern`: regex for terminal commands to treat as Codex work.
 - `codexFinishNotifier.taskbarFlash`: on Windows, flash the VS Code taskbar icon while the alert is active.
 

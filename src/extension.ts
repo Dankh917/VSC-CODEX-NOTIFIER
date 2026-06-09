@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
-import { type ChildProcess, spawn } from 'node:child_process';
+import { type ChildProcess, spawn, execFile } from 'node:child_process';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 
 type FlashMode = 'editorOverlay' | 'workbenchColors' | 'off';
+type OpenAiCodexDetectionMode = 'conservative' | 'chatHeuristic';
 
 interface NotifierConfig {
   enabled: boolean;
@@ -12,6 +15,10 @@ interface NotifierConfig {
   maxFlashSeconds: number;
   terminalCommandPattern: string;
   detectTerminalCodex: boolean;
+  detectCodexProcess: boolean;
+  detectOpenAiCodexLog: boolean;
+  openAiCodexDetectionMode: OpenAiCodexDetectionMode;
+  processPollIntervalMs: number;
   notifyWhenWindowFocused: boolean;
   taskbarFlash: boolean;
   workbenchColorTarget: 'workspace' | 'global';
@@ -33,15 +40,45 @@ let workbenchRestore: WorkbenchRestore | undefined;
 let pulseGeneration = 0;
 let workbenchUpdateQueue: Thenable<void> = Promise.resolve();
 let pulseStep = 0;
-const stopHookFileNotifications = new Map<string, number>();
+let processPollTimer: NodeJS.Timeout | undefined;
+let knownCodexProcessIds = new Set<number>();
+let processMonitorInitialized = false;
+let processPolling = false;
+let processMonitorStarted = false;
+let openAiCodexLogPath: string | undefined;
+let openAiCodexLogOffset = 0;
+let openAiCodexLogInitialized = false;
+let openAiCodexLogPolling = false;
+let openAiCodexLogLastAlertAt = 0;
+let openAiCodexLogCandidate: OpenAiCodexLogCandidate | undefined;
+let openAiCodexLogQuietTimer: NodeJS.Timeout | undefined;
+let openAiCodexLogCandidateId = 0;
+
+const openAiCodexTurnDiffMarker = 'requestKind=turn-diff-capture-complete';
+const openAiCodexStreamMarker = 'method=thread-stream-state-changed';
+const openAiCodexReadMarker = 'method=thread-read-state-changed';
+const openAiCodexHeuristicQuietMs = 3000;
+const openAiCodexHeuristicMaxGapMs = 7000;
+const openAiCodexHeuristicMaxCandidateMs = 180000;
+const openAiCodexHeuristicMinStreamEvents = 6;
+const openAiCodexAlertCooldownMs = 12000;
 
 interface WorkbenchRestore {
   readonly target: vscode.ConfigurationTarget;
   readonly originalValue: Record<string, unknown> | undefined;
 }
 
+interface OpenAiCodexLogCandidate {
+  id: number;
+  startedAt: number;
+  lastActivityAt: number;
+  streamEvents: number;
+  sawReadState: boolean;
+}
+
 export function activate(context: vscode.ExtensionContext) {
   extensionUri = context.extensionUri;
+  openAiCodexLogPath = path.join(path.dirname(context.logUri.fsPath), 'openai.chatgpt', 'Codex.log');
   output = vscode.window.createOutputChannel('Codex Finish Notifier');
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
   statusBar.command = 'codexFinishNotifier.dismissAlert';
@@ -54,8 +91,6 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('codexFinishNotifier.dismissAlert', () => stopAlert()),
     vscode.commands.registerCommand('codexFinishNotifier.markStarted', () => markStarted('manual command')),
     vscode.commands.registerCommand('type', onTypeCommand),
-    vscode.window.registerUriHandler({ handleUri }),
-    registerStopHookFileWatcher(),
     vscode.window.onDidStartTerminalShellExecution(onTerminalExecutionStarted),
     vscode.window.onDidEndTerminalShellExecution(onTerminalExecutionEnded),
     vscode.window.onDidChangeActiveTextEditor(() => dismissOnInteraction('active editor changed')),
@@ -66,47 +101,21 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration(configSection)) {
         refreshStatus();
+        restartProcessMonitor();
         if (alertActive) {
           restartFlash();
         }
       }
     }),
-    { dispose: stopAlert }
+    { dispose: () => {
+      stopProcessMonitor();
+      stopAlert();
+    } }
   );
 
   refreshStatus();
+  restartProcessMonitor();
   output.appendLine('Codex Finish Notifier activated.');
-}
-
-function registerStopHookFileWatcher(): vscode.Disposable {
-  const watcher = vscode.workspace.createFileSystemWatcher('**/.codex/last-notify.log', false, false, true);
-  const subscriptions = [
-    watcher,
-    watcher.onDidCreate(onStopHookFileChanged),
-    watcher.onDidChange(onStopHookFileChanged)
-  ];
-
-  return vscode.Disposable.from(...subscriptions);
-}
-
-function onStopHookFileChanged(uri: vscode.Uri) {
-  const key = uri.toString();
-  const now = Date.now();
-  const previous = stopHookFileNotifications.get(key) ?? 0;
-
-  if (now - previous < 1000) {
-    return;
-  }
-
-  stopHookFileNotifications.set(key, now);
-  void notifyDone(`Codex Stop hook file: ${vscode.workspace.asRelativePath(uri, false)}`);
-}
-
-function handleUri(uri: vscode.Uri) {
-  const normalizedPath = uri.path.replace(/^\/+/, '').toLowerCase();
-  if (uri.authority.toLowerCase() === 'done' || normalizedPath === 'done') {
-    void notifyDone('Codex Stop hook');
-  }
 }
 
 export function deactivate() {
@@ -127,10 +136,324 @@ function getConfig(): NotifierConfig {
       '(^|\\b)(codex|npx\\s+codex|pnpm\\s+codex|npm\\s+exec\\s+codex)(\\b|\\s)'
     ),
     detectTerminalCodex: cfg.get('detectTerminalCodex', true),
+    detectCodexProcess: cfg.get('detectCodexProcess', false),
+    detectOpenAiCodexLog: cfg.get('detectOpenAiCodexLog', true),
+    openAiCodexDetectionMode: cfg.get<OpenAiCodexDetectionMode>('openAiCodexDetectionMode', 'chatHeuristic'),
+    processPollIntervalMs: clamp(cfg.get('processPollIntervalMs', 500), 500, 10000),
     notifyWhenWindowFocused: cfg.get('notifyWhenWindowFocused', true),
     taskbarFlash: cfg.get('taskbarFlash', true),
     workbenchColorTarget: cfg.get<'workspace' | 'global'>('workbenchColorTarget', 'workspace')
   };
+}
+
+function restartProcessMonitor() {
+  stopProcessMonitor();
+
+  const cfg = getConfig();
+  if (!cfg.enabled || (!cfg.detectCodexProcess && !cfg.detectOpenAiCodexLog)) {
+    knownCodexProcessIds = new Set();
+    processMonitorInitialized = false;
+    processMonitorStarted = false;
+    openAiCodexLogOffset = 0;
+    openAiCodexLogInitialized = false;
+    resetOpenAiCodexLogCandidate();
+    return;
+  }
+
+  if (!cfg.detectCodexProcess) {
+    knownCodexProcessIds = new Set();
+    processMonitorInitialized = false;
+    processMonitorStarted = false;
+  }
+
+  void pollCodexProcesses();
+  processPollTimer = setInterval(() => void pollCodexProcesses(), cfg.processPollIntervalMs);
+}
+
+function stopProcessMonitor() {
+  if (processPollTimer) {
+    clearInterval(processPollTimer);
+    processPollTimer = undefined;
+  }
+}
+
+async function pollCodexProcesses() {
+  if (processPolling) {
+    return;
+  }
+
+  processPolling = true;
+  try {
+    const cfg = getConfig();
+    const processes = cfg.detectCodexProcess ? await listCodexProcesses() : [];
+    if (cfg.detectOpenAiCodexLog) {
+      await pollOpenAiCodexLog();
+    }
+    if (!cfg.detectCodexProcess) {
+      knownCodexProcessIds = new Set();
+      processMonitorInitialized = true;
+      processMonitorStarted = false;
+      return;
+    }
+
+    const currentIds = new Set(processes.map((process) => process.pid));
+    const hadProcesses = knownCodexProcessIds.size > 0;
+    const hasProcesses = currentIds.size > 0;
+
+    if (!processMonitorInitialized) {
+      knownCodexProcessIds = currentIds;
+      processMonitorStarted = hasProcesses;
+      processMonitorInitialized = true;
+      return;
+    }
+
+    if (hasProcesses && !hadProcesses) {
+      markStarted(`process: ${processes.map((process) => process.label).join(', ')}`);
+    } else if (!hasProcesses && hadProcesses && processMonitorStarted) {
+      void notifyDone('Codex process ended');
+    }
+
+    if (hasProcesses) {
+      processMonitorStarted = true;
+    }
+    knownCodexProcessIds = currentIds;
+  } catch (error) {
+    output.appendLine(`Unable to poll Codex processes: ${String(error)}`);
+  } finally {
+    processPolling = false;
+  }
+}
+
+async function pollOpenAiCodexLog() {
+  if (!openAiCodexLogPath || openAiCodexLogPolling) {
+    return;
+  }
+
+  openAiCodexLogPolling = true;
+  try {
+    const stat = await fs.stat(openAiCodexLogPath);
+    if (!openAiCodexLogInitialized || stat.size < openAiCodexLogOffset) {
+      openAiCodexLogOffset = stat.size;
+      openAiCodexLogInitialized = true;
+      return;
+    }
+
+    if (stat.size === openAiCodexLogOffset) {
+      return;
+    }
+
+    const content = await fs.readFile(openAiCodexLogPath);
+    const chunk = content.subarray(openAiCodexLogOffset).toString('utf8');
+    openAiCodexLogOffset = stat.size;
+    inspectOpenAiCodexLogChunk(chunk);
+  } catch (error) {
+    const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
+    if (code !== 'ENOENT') {
+      output.appendLine(`Unable to read OpenAI Codex log: ${String(error)}`);
+    }
+  } finally {
+    openAiCodexLogPolling = false;
+  }
+}
+
+function inspectOpenAiCodexLogChunk(chunk: string) {
+  if (!chunk) {
+    return;
+  }
+
+  if (chunk.includes(openAiCodexTurnDiffMarker)) {
+    resetOpenAiCodexLogCandidate();
+    notifyFromOpenAiCodexLog('OpenAI Codex turn diff completed');
+    return;
+  }
+
+  if (getConfig().openAiCodexDetectionMode !== 'chatHeuristic') {
+    return;
+  }
+
+  for (const line of chunk.split(/\r?\n/)) {
+    if (line.includes(openAiCodexStreamMarker)) {
+      trackOpenAiCodexStreamActivity();
+    } else if (line.includes(openAiCodexReadMarker)) {
+      trackOpenAiCodexReadState();
+    }
+  }
+}
+
+function trackOpenAiCodexStreamActivity() {
+  const now = Date.now();
+  if (now - openAiCodexLogLastAlertAt < openAiCodexAlertCooldownMs) {
+    return;
+  }
+
+  if (
+    !openAiCodexLogCandidate ||
+    now - openAiCodexLogCandidate.lastActivityAt > openAiCodexHeuristicMaxGapMs ||
+    now - openAiCodexLogCandidate.startedAt > openAiCodexHeuristicMaxCandidateMs
+  ) {
+    openAiCodexLogCandidate = {
+      id: ++openAiCodexLogCandidateId,
+      startedAt: now,
+      lastActivityAt: now,
+      streamEvents: 0,
+      sawReadState: false
+    };
+  }
+
+  openAiCodexLogCandidate.lastActivityAt = now;
+  openAiCodexLogCandidate.streamEvents += 1;
+
+  if (openAiCodexLogCandidate.sawReadState) {
+    scheduleOpenAiCodexLogQuietCheck(openAiCodexLogCandidate.id);
+  }
+}
+
+function trackOpenAiCodexReadState() {
+  const candidate = openAiCodexLogCandidate;
+  const now = Date.now();
+  if (
+    !candidate ||
+    candidate.streamEvents < openAiCodexHeuristicMinStreamEvents ||
+    now - candidate.lastActivityAt > openAiCodexHeuristicMaxGapMs ||
+    now - candidate.startedAt > openAiCodexHeuristicMaxCandidateMs
+  ) {
+    return;
+  }
+
+  candidate.sawReadState = true;
+  candidate.lastActivityAt = now;
+  scheduleOpenAiCodexLogQuietCheck(candidate.id);
+}
+
+function scheduleOpenAiCodexLogQuietCheck(candidateId: number) {
+  if (openAiCodexLogQuietTimer) {
+    clearTimeout(openAiCodexLogQuietTimer);
+  }
+
+  openAiCodexLogQuietTimer = setTimeout(
+    () => completeOpenAiCodexLogCandidate(candidateId),
+    openAiCodexHeuristicQuietMs
+  );
+}
+
+function completeOpenAiCodexLogCandidate(candidateId: number) {
+  openAiCodexLogQuietTimer = undefined;
+
+  const candidate = openAiCodexLogCandidate;
+  if (!candidate || candidate.id !== candidateId) {
+    return;
+  }
+
+  const now = Date.now();
+  const quietFor = now - candidate.lastActivityAt;
+  if (quietFor < openAiCodexHeuristicQuietMs - 50) {
+    scheduleOpenAiCodexLogQuietCheck(candidate.id);
+    return;
+  }
+
+  openAiCodexLogCandidate = undefined;
+  if (candidate.sawReadState && candidate.streamEvents >= openAiCodexHeuristicMinStreamEvents) {
+    notifyFromOpenAiCodexLog('OpenAI Codex chat stream settled');
+  }
+}
+
+function resetOpenAiCodexLogCandidate() {
+  openAiCodexLogCandidate = undefined;
+  if (openAiCodexLogQuietTimer) {
+    clearTimeout(openAiCodexLogQuietTimer);
+    openAiCodexLogQuietTimer = undefined;
+  }
+}
+
+function notifyFromOpenAiCodexLog(source: string) {
+  const now = Date.now();
+  if (now - openAiCodexLogLastAlertAt < openAiCodexAlertCooldownMs) {
+    return;
+  }
+
+  openAiCodexLogLastAlertAt = now;
+  resetOpenAiCodexLogCandidate();
+  void notifyDone(source);
+}
+
+interface CodexProcess {
+  readonly pid: number;
+  readonly label: string;
+}
+
+function listCodexProcesses(): Promise<CodexProcess[]> {
+  if (process.platform === 'win32') {
+    return listWindowsCodexProcesses();
+  }
+
+  return listUnixCodexProcesses();
+}
+
+function listWindowsCodexProcesses(): Promise<CodexProcess[]> {
+  const script = [
+    '$ErrorActionPreference = "SilentlyContinue"',
+    'Get-CimInstance Win32_Process -Filter "Name = \'codex.exe\'" |',
+    'Where-Object { $_.ExecutablePath -like "*\\openai.chatgpt-*\\bin\\*" -or $_.CommandLine -match "(^|[\\\\/\\s])codex(\\.exe)?([\\s`"]|$)" } |',
+    'ForEach-Object { $label = $_.ExecutablePath; if (-not $label) { $label = $_.Name }; "{0}|{1}" -f $_.ProcessId, $label }'
+  ].join('\n');
+
+  return execFileLines('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    script
+  ]).then((lines) => parseProcessLines(lines));
+}
+
+function listUnixCodexProcesses(): Promise<CodexProcess[]> {
+  return execFileLines('ps', ['-eo', 'pid=,comm=,args=']).then((lines) => {
+    return lines.flatMap((line) => {
+      const match = line.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/);
+      if (!match) {
+        return [];
+      }
+
+      const pid = Number.parseInt(match[1], 10);
+      const command = match[2];
+      const args = match[3];
+      if (!Number.isFinite(pid) || pid === process.pid) {
+        return [];
+      }
+
+      if (!/(^|[\\/])codex(?:$|[.\s])|^codex$/i.test(command) && !/(^|[\\/])codex(?:$|[.\s])/i.test(args)) {
+        return [];
+      }
+
+      return [{ pid, label: command }];
+    });
+  });
+}
+
+function execFileLines(command: string, args: string[]): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { windowsHide: true, timeout: 5000, maxBuffer: 1024 * 256 }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve(stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+    });
+  });
+}
+
+function parseProcessLines(lines: string[]): CodexProcess[] {
+  return lines.flatMap((line) => {
+    const [pidValue, label = 'codex'] = line.split('|', 2);
+    const pid = Number.parseInt(pidValue, 10);
+    if (!Number.isFinite(pid)) {
+      return [];
+    }
+
+    return [{ pid, label }];
+  });
 }
 
 function onTypeCommand(args: unknown) {
@@ -611,17 +934,10 @@ function stopAlert() {
 }
 
 function closeNotificationToasts() {
-  const commands = [
-    'workbench.action.closeMessages',
-    'notifications.hideToasts'
-  ];
-
-  for (const command of commands) {
-    void vscode.commands.executeCommand(command).then(
-      undefined,
-      (error) => output.appendLine(`Unable to run notification close command "${command}": ${String(error)}`)
-    );
-  }
+  void vscode.commands.executeCommand('notifications.hideToasts').then(
+    undefined,
+    (error) => output.appendLine(`Unable to run notification close command "notifications.hideToasts": ${String(error)}`)
+  );
 }
 
 function stopFlashOnly() {
