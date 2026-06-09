@@ -1,0 +1,4 @@
+node_modules/
+*.vsix
+.codex/
+.vscode/settings.json

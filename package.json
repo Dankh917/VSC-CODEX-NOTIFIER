@@ -1,0 +1,133 @@
+{
+  "name": "codex-finish-notifier",
+  "displayName": "Codex Finish Notifier",
+  "description": "Play a gentle sound and flash VS Code when Codex work finishes.",
+  "version": "0.0.1",
+  "publisher": "local-dev",
+  "engines": {
+    "vscode": "^1.96.2"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onUri",
+    "onCommand:codexFinishNotifier.notifyDone",
+    "onCommand:codexFinishNotifier.testAlert",
+    "onCommand:codexFinishNotifier.dismissAlert",
+    "onCommand:codexFinishNotifier.markStarted"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexFinishNotifier.notifyDone",
+        "title": "Notify Codex Done",
+        "category": "Codex Notifier",
+        "icon": "$(bell)"
+      },
+      {
+        "command": "codexFinishNotifier.testAlert",
+        "title": "Test Completion Alert",
+        "category": "Codex Notifier",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "codexFinishNotifier.dismissAlert",
+        "title": "Dismiss Completion Alert",
+        "category": "Codex Notifier",
+        "icon": "$(check)"
+      },
+      {
+        "command": "codexFinishNotifier.markStarted",
+        "title": "Mark Codex Started",
+        "category": "Codex Notifier",
+        "icon": "$(watch)"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Finish Notifier",
+      "properties": {
+        "codexFinishNotifier.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Codex completion alerts."
+        },
+        "codexFinishNotifier.playSound": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play the bundled notification MP3 when Codex completion is detected."
+        },
+        "codexFinishNotifier.flashMode": {
+          "type": "string",
+          "enum": [
+            "editorOverlay",
+            "workbenchColors",
+            "off"
+          ],
+          "default": "workbenchColors",
+          "description": "Visual completion alert. workbenchColors flashes only the status bar and restores it; editorOverlay is kept as a status-bar-only compatibility alias."
+        },
+        "codexFinishNotifier.stopOnInteraction": {
+          "type": "boolean",
+          "default": true,
+          "description": "Stop the visual alert when the VS Code window gains focus or the user interacts with editors or terminals."
+        },
+        "codexFinishNotifier.flashIntervalMs": {
+          "type": "number",
+          "default": 900,
+          "minimum": 500,
+          "maximum": 3000,
+          "description": "Interval for each status bar pulse step."
+        },
+        "codexFinishNotifier.maxFlashSeconds": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 600,
+          "description": "Maximum time the visual alert should continue if there is no interaction. Set to 0 or 1 to keep it active until interaction or dismissal."
+        },
+        "codexFinishNotifier.terminalCommandPattern": {
+          "type": "string",
+          "default": "(^|\\\\b)(codex|npx\\\\s+codex|pnpm\\\\s+codex|npm\\\\s+exec\\\\s+codex)(\\\\b|\\\\s)",
+          "description": "JavaScript regular expression used to detect Codex CLI commands in terminals with shell integration."
+        },
+        "codexFinishNotifier.detectTerminalCodex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically alert when a matching terminal command ends. Requires VS Code terminal shell integration."
+        },
+        "codexFinishNotifier.notifyWhenWindowFocused": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a small VS Code information notification when completion is detected."
+        },
+        "codexFinishNotifier.taskbarFlash": {
+          "type": "boolean",
+          "default": true,
+          "description": "On Windows, flash the VS Code taskbar icon while the completion alert is active."
+        },
+        "codexFinishNotifier.workbenchColorTarget": {
+          "type": "string",
+          "enum": [
+            "workspace",
+            "global"
+          ],
+          "default": "workspace",
+          "description": "Where temporary workbench color customizations are written when flashMode is workbenchColors."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.96.0",
+    "typescript": "^5.8.3"
+  }
+}
