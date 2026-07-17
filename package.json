@@ -2,8 +2,9 @@
   "name": "codex-finish-notifier",
   "displayName": "Codex Finish Notifier",
   "description": "Play a gentle sound and flash VS Code when Codex work finishes.",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "dankh917",
+  "icon": "media/marketplace-icon.png",
   "license": "MIT",
   "repository": {
     "type": "git",
