@@ -38,7 +38,10 @@ exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const node_child_process_1 = require("node:child_process");
 const fs = __importStar(require("node:fs/promises"));
+const os = __importStar(require("node:os"));
 const path = __importStar(require("node:path"));
+const node_crypto_1 = require("node:crypto");
+const sound_js_1 = require("./sound.js");
 const configSection = 'codexFinishNotifier';
 let statusBar;
 let output;
@@ -47,6 +50,7 @@ let extensionUri;
 let flashTimer;
 let maxFlashTimer;
 let inputWatcher;
+let activeSoundProcess;
 let isPulseOn = false;
 let alertActive = false;
 let ignoreInteractionUntil = 0;
@@ -67,6 +71,7 @@ let openAiCodexLogLastAlertAt = 0;
 let openAiCodexLogCandidate;
 let openAiCodexLogQuietTimer;
 let openAiCodexLogCandidateId = 0;
+let lastCompletionAlertAt = 0;
 const openAiCodexTurnDiffMarker = 'requestKind=turn-diff-capture-complete';
 const openAiCodexStreamMarker = 'method=thread-stream-state-changed';
 const openAiCodexReadMarker = 'method=thread-read-state-changed';
@@ -75,6 +80,7 @@ const openAiCodexHeuristicMaxGapMs = 7000;
 const openAiCodexHeuristicMaxCandidateMs = 180000;
 const openAiCodexHeuristicMinStreamEvents = 6;
 const openAiCodexAlertCooldownMs = 12000;
+const completionDedupeWindowMs = 2500;
 function activate(context) {
     extensionUri = context.extensionUri;
     openAiCodexLogPath = path.join(path.dirname(context.logUri.fsPath), 'openai.chatgpt', 'Codex.log');
@@ -83,8 +89,9 @@ function activate(context) {
     statusBar.command = 'codexFinishNotifier.dismissAlert';
     statusBar.tooltip = 'Codex Finish Notifier';
     context.subscriptions.push(output, statusBar);
-    context.subscriptions.push(vscode.commands.registerCommand('codexFinishNotifier.notifyDone', () => notifyDone('manual command')), vscode.commands.registerCommand('codexFinishNotifier.testAlert', () => notifyDone('test command')), vscode.commands.registerCommand('codexFinishNotifier.dismissAlert', () => stopAlert()), vscode.commands.registerCommand('codexFinishNotifier.markStarted', () => markStarted('manual command')), vscode.commands.registerCommand('type', onTypeCommand), vscode.window.onDidStartTerminalShellExecution(onTerminalExecutionStarted), vscode.window.onDidEndTerminalShellExecution(onTerminalExecutionEnded), vscode.window.onDidChangeActiveTextEditor(() => dismissOnInteraction('active editor changed')), vscode.window.onDidChangeTextEditorSelection(onTextEditorSelectionChanged), vscode.window.onDidChangeTextEditorVisibleRanges(() => dismissOnInteraction('editor scrolled')), vscode.window.onDidChangeActiveTerminal(() => dismissOnInteraction('active terminal changed')), vscode.workspace.onDidChangeTextDocument(onTextDocumentChanged), vscode.workspace.onDidChangeConfiguration((event) => {
+    context.subscriptions.push(vscode.commands.registerCommand('codexFinishNotifier.openSettingsPanel', () => NotifierSettingsPanel.show()), vscode.commands.registerCommand('codexFinishNotifier.notifyDone', () => notifyDone('manual command')), vscode.commands.registerCommand('codexFinishNotifier.testAlert', () => notifyDone('test command')), vscode.commands.registerCommand('codexFinishNotifier.selectSound', selectCustomSound), vscode.commands.registerCommand('codexFinishNotifier.dismissAlert', () => stopAlert()), vscode.commands.registerCommand('codexFinishNotifier.markStarted', () => markStarted('manual command')), vscode.commands.registerCommand('type', onTypeCommand), vscode.window.onDidStartTerminalShellExecution(onTerminalExecutionStarted), vscode.window.onDidEndTerminalShellExecution(onTerminalExecutionEnded), vscode.window.onDidChangeActiveTextEditor(() => dismissOnInteraction('active editor changed')), vscode.window.onDidChangeTextEditorSelection(onTextEditorSelectionChanged), vscode.window.onDidChangeTextEditorVisibleRanges(() => dismissOnInteraction('editor scrolled')), vscode.window.onDidChangeActiveTerminal(() => dismissOnInteraction('active terminal changed')), vscode.workspace.onDidChangeTextDocument(onTextDocumentChanged), vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration(configSection)) {
+            NotifierSettingsPanel.refreshActive();
             refreshStatus();
             restartProcessMonitor();
             if (alertActive) {
@@ -94,6 +101,7 @@ function activate(context) {
     }), { dispose: () => {
             stopProcessMonitor();
             stopAlert();
+            stopSound();
         } });
     refreshStatus();
     restartProcessMonitor();
@@ -101,12 +109,15 @@ function activate(context) {
 }
 function deactivate() {
     stopAlert();
+    stopSound();
 }
 function getConfig() {
     const cfg = vscode.workspace.getConfiguration(configSection);
     return {
         enabled: cfg.get('enabled', true),
         playSound: cfg.get('playSound', true),
+        soundVolume: clamp(cfg.get('soundVolume', 50), 0, 100),
+        soundPath: cfg.get('soundPath', ''),
         flashMode: cfg.get('flashMode', 'workbenchColors'),
         stopOnInteraction: cfg.get('stopOnInteraction', true),
         flashIntervalMs: clamp(cfg.get('flashIntervalMs', 900), 500, 3000),
@@ -450,13 +461,20 @@ async function notifyDone(source) {
     if (!cfg.enabled) {
         return;
     }
+    const now = Date.now();
+    const manualRequest = source === 'manual command' || source === 'test command';
+    if (alertActive || (!manualRequest && now - lastCompletionAlertAt < completionDedupeWindowMs)) {
+        output.appendLine(`Ignored duplicate completion from ${source}.`);
+        return;
+    }
+    lastCompletionAlertAt = now;
     output.appendLine(`Codex completion detected from ${source}.`);
     ignoreInteractionUntil = Date.now() + 350;
     setAlertStatusFrame(0);
     statusBar.tooltip = 'Codex work finished. Click to dismiss the alert.';
     statusBar.show();
-    if (cfg.playSound) {
-        playGentleSound();
+    if (cfg.playSound && cfg.soundVolume > 0) {
+        playGentleSound(cfg);
     }
     if (cfg.taskbarFlash) {
         flashTaskbar(true);
@@ -472,10 +490,232 @@ async function notifyDone(source) {
         });
     }
 }
-function playGentleSound() {
+async function selectCustomSound() {
+    const selected = await vscode.window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: false,
+        openLabel: 'Use Notification Sound',
+        filters: {
+            'Audio files': ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'],
+            'All files': ['*']
+        }
+    });
+    if (!selected?.[0]) {
+        return;
+    }
+    await vscode.workspace
+        .getConfiguration(configSection)
+        .update('soundPath', selected[0].fsPath, vscode.ConfigurationTarget.Global);
+    void vscode.window.showInformationMessage('Codex Notifier custom sound updated. Run "Test Completion Alert" to preview it.');
+}
+class NotifierSettingsPanel {
+    panel;
+    static current;
+    constructor(panel) {
+        this.panel = panel;
+        panel.webview.html = this.getHtml(panel.webview);
+        panel.webview.onDidReceiveMessage((message) => void this.handleMessage(message));
+        panel.onDidDispose(() => {
+            if (NotifierSettingsPanel.current === this) {
+                NotifierSettingsPanel.current = undefined;
+            }
+        });
+    }
+    static show() {
+        if (NotifierSettingsPanel.current) {
+            NotifierSettingsPanel.current.panel.reveal(vscode.ViewColumn.Active);
+            NotifierSettingsPanel.current.refresh();
+            return;
+        }
+        const panel = vscode.window.createWebviewPanel('codexFinishNotifier.settingsPanel', 'Codex Notifier Settings', vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
+        NotifierSettingsPanel.current = new NotifierSettingsPanel(panel);
+    }
+    static refreshActive() {
+        NotifierSettingsPanel.current?.refresh();
+    }
+    refresh() {
+        void this.panel.webview.postMessage({ type: 'config', config: this.getViewConfig() });
+    }
+    async handleMessage(message) {
+        if (!message || typeof message !== 'object' || !('type' in message)) {
+            return;
+        }
+        const type = String(message.type);
+        try {
+            if (type === 'setEnabled' && 'value' in message && typeof message.value === 'boolean') {
+                await this.updateConfig('enabled', message.value);
+            }
+            else if (type === 'setPlaySound' && 'value' in message && typeof message.value === 'boolean') {
+                await this.updateConfig('playSound', message.value);
+            }
+            else if (type === 'setVolume' && 'value' in message) {
+                const volume = Number(message.value);
+                if (Number.isFinite(volume)) {
+                    await this.updateConfig('soundVolume', Math.round(clamp(volume, 0, 100)));
+                }
+            }
+            else if (type === 'selectSound') {
+                await selectCustomSound();
+            }
+            else if (type === 'resetSound') {
+                await this.updateConfig('soundPath', '');
+            }
+            else if (type === 'testAlert') {
+                await notifyDone('test command');
+            }
+            else if (type === 'openSettings') {
+                await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:dankh917.codex-finish-notifier');
+            }
+        }
+        catch (error) {
+            output.appendLine(`Unable to update notifier settings panel: ${String(error)}`);
+            void vscode.window.showErrorMessage(`Unable to update Codex Notifier settings: ${String(error)}`);
+        }
+    }
+    updateConfig(key, value) {
+        return vscode.workspace
+            .getConfiguration(configSection)
+            .update(key, value, vscode.ConfigurationTarget.Global);
+    }
+    getViewConfig() {
+        const cfg = getConfig();
+        return {
+            enabled: cfg.enabled,
+            playSound: cfg.playSound,
+            soundVolume: Math.round(cfg.soundVolume),
+            soundPath: cfg.soundPath,
+            soundName: cfg.soundPath ? path.basename(cfg.soundPath) : 'Bundled notification'
+        };
+    }
+    getHtml(webview) {
+        const cfg = this.getViewConfig();
+        const nonce = (0, node_crypto_1.randomBytes)(16).toString('base64');
+        return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+  <style nonce="${nonce}">
+    :root { color-scheme: light dark; }
+    body {
+      padding: 14px 16px 24px;
+      color: var(--vscode-foreground);
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+    }
+    h2 { margin: 0 0 16px; font-size: 15px; font-weight: 600; }
+    .section { margin-bottom: 20px; }
+    .toggle { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
+    .toggle input { margin: 0; }
+    .label-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px; }
+    .volume-value { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+    input[type='range'] { width: 100%; accent-color: var(--vscode-focusBorder); }
+    .sound-name {
+      padding: 8px 10px;
+      margin: 7px 0 9px;
+      overflow: hidden;
+      color: var(--vscode-descriptionForeground);
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-input-border, transparent);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .button-row { display: flex; flex-wrap: wrap; gap: 7px; }
+    button {
+      padding: 5px 10px;
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+      border: 1px solid transparent;
+      cursor: pointer;
+    }
+    button:hover { background: var(--vscode-button-hoverBackground); }
+    button.secondary {
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+    }
+    button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    button:focus-visible, input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+    .hint { margin-top: 12px; color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.45; }
+  </style>
+</head>
+<body>
+  <h2>Completion alerts</h2>
+  <div class="section">
+    <label class="toggle"><input id="enabled" type="checkbox" ${cfg.enabled ? 'checked' : ''}> Enable notifier</label>
+    <label class="toggle"><input id="playSound" type="checkbox" ${cfg.playSound ? 'checked' : ''}> Play sound</label>
+  </div>
+  <div class="section">
+    <div class="label-row"><label for="volume">Volume</label><span id="volumeValue" class="volume-value">${cfg.soundVolume}%</span></div>
+    <input id="volume" type="range" min="0" max="100" step="1" value="${cfg.soundVolume}" aria-label="Notification volume">
+  </div>
+  <div class="section">
+    <label>Notification sound</label>
+    <div id="soundName" class="sound-name" title="${escapeHtml(cfg.soundPath)}">${escapeHtml(cfg.soundName)}</div>
+    <div class="button-row">
+      <button id="selectSound">Choose audio</button>
+      <button id="resetSound" class="secondary" ${cfg.soundPath ? '' : 'hidden'}>Use bundled</button>
+    </div>
+  </div>
+  <div class="button-row">
+    <button id="testAlert">Test alert</button>
+    <button id="openSettings" class="secondary">All settings</button>
+  </div>
+  <p class="hint">Changes are saved to your global VS Code settings.</p>
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    const enabled = document.getElementById('enabled');
+    const playSound = document.getElementById('playSound');
+    const volume = document.getElementById('volume');
+    const volumeValue = document.getElementById('volumeValue');
+    const soundName = document.getElementById('soundName');
+    const resetSound = document.getElementById('resetSound');
+
+    enabled.addEventListener('change', () => vscode.postMessage({ type: 'setEnabled', value: enabled.checked }));
+    playSound.addEventListener('change', () => vscode.postMessage({ type: 'setPlaySound', value: playSound.checked }));
+    volume.addEventListener('input', () => { volumeValue.textContent = volume.value + '%'; });
+    volume.addEventListener('change', () => vscode.postMessage({ type: 'setVolume', value: Number(volume.value) }));
+    document.getElementById('selectSound').addEventListener('click', () => vscode.postMessage({ type: 'selectSound' }));
+    resetSound.addEventListener('click', () => vscode.postMessage({ type: 'resetSound' }));
+    document.getElementById('testAlert').addEventListener('click', () => vscode.postMessage({ type: 'testAlert' }));
+    document.getElementById('openSettings').addEventListener('click', () => vscode.postMessage({ type: 'openSettings' }));
+
+    window.addEventListener('message', (event) => {
+      if (event.data?.type !== 'config') return;
+      const config = event.data.config;
+      enabled.checked = config.enabled;
+      playSound.checked = config.playSound;
+      volume.value = String(config.soundVolume);
+      volumeValue.textContent = config.soundVolume + '%';
+      soundName.textContent = config.soundName;
+      soundName.title = config.soundPath;
+      resetSound.hidden = !config.soundPath;
+    });
+  </script>
+</body>
+</html>`;
+    }
+}
+function escapeHtml(value) {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+function playGentleSound(cfg) {
     try {
-        const soundPath = vscode.Uri.joinPath(extensionUri, 'media', 'notification.mp3').fsPath;
+        if (activeSoundProcess) {
+            output.appendLine('Skipped overlapping notification sound playback.');
+            return;
+        }
+        const bundledPath = vscode.Uri.joinPath(extensionUri, 'media', 'notification.mp3').fsPath;
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const soundPath = (0, sound_js_1.resolveSoundPath)(cfg.soundPath, bundledPath, workspacePath, os.homedir());
         const quotedSoundPath = toPowerShellSingleQuotedString(soundPath);
+        const unitVolume = (0, sound_js_1.volumeToUnitInterval)(cfg.soundVolume);
         if (process.platform === 'win32') {
             spawnSound('powershell.exe', [
                 '-Sta',
@@ -488,34 +728,76 @@ function playGentleSound() {
                 '-Command',
                 `
 $SoundPath = ${quotedSoundPath}
+$ErrorActionPreference = 'Stop'
+if (-not (Test-Path -LiteralPath $SoundPath -PathType Leaf)) {
+  throw "Notification sound does not exist: $SoundPath"
+}
 Add-Type -AssemblyName PresentationCore
 $player = New-Object System.Windows.Media.MediaPlayer
 $player.Open([Uri]$SoundPath)
-$player.Volume = 0.75
+$deadline = [DateTime]::UtcNow.AddSeconds(5)
+while (-not $player.NaturalDuration.HasTimeSpan -and [DateTime]::UtcNow -lt $deadline) {
+  Start-Sleep -Milliseconds 25
+}
+if (-not $player.NaturalDuration.HasTimeSpan) {
+  $player.Close()
+  throw "Timed out while loading notification sound: $SoundPath"
+}
+$player.Volume = ${unitVolume}
 $player.Play()
-Start-Sleep -Milliseconds 1800
+$playbackMs = [Math]::Ceiling($player.NaturalDuration.TimeSpan.TotalMilliseconds) + 150
+Start-Sleep -Milliseconds $playbackMs
 $player.Close()
 `
             ]);
             return;
         }
         if (process.platform === 'darwin') {
-            spawnSound('afplay', [soundPath]);
+            spawnSound('afplay', ['-v', unitVolume, soundPath]);
             return;
         }
-        const player = spawnSound('mpg123', ['-q', soundPath]);
-        player.on('error', () => {
-            spawnSound('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet', soundPath]);
-        });
+        spawnSound('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet', '-volume', Math.round(cfg.soundVolume).toString(), soundPath], () => spawnSound('mpg123', ['-q', '--scale', (0, sound_js_1.volumeToMpg123Scale)(cfg.soundVolume), soundPath]));
     }
     catch (error) {
         output.appendLine(`Unable to play completion sound: ${String(error)}`);
     }
 }
-function spawnSound(command, args) {
+function spawnSound(command, args, onFailure) {
     const child = (0, node_child_process_1.spawn)(command, args, { windowsHide: true, stdio: 'ignore' });
-    child.on('error', (error) => output.appendLine(`Unable to run sound command "${command}": ${String(error)}`));
+    activeSoundProcess = child;
+    let failedToStart = false;
+    child.once('error', (error) => {
+        failedToStart = true;
+        if (activeSoundProcess === child) {
+            activeSoundProcess = undefined;
+        }
+        if (onFailure) {
+            onFailure();
+        }
+        else {
+            output.appendLine(`Unable to run sound command "${command}": ${String(error)}`);
+        }
+    });
+    child.once('exit', (code) => {
+        const wasActive = activeSoundProcess === child;
+        if (wasActive) {
+            activeSoundProcess = undefined;
+        }
+        if (!failedToStart && wasActive && code !== 0) {
+            if (onFailure) {
+                onFailure();
+            }
+            else {
+                output.appendLine(`Sound command "${command}" exited with code ${code ?? 'unknown'}. Check codexFinishNotifier.soundPath.`);
+            }
+        }
+    });
     return child;
+}
+function stopSound() {
+    const soundProcess = activeSoundProcess;
+    activeSoundProcess = undefined;
+    soundProcess?.kill();
 }
 function toPowerShellSingleQuotedString(value) {
     return `'${value.replace(/'/g, "''")}'`;

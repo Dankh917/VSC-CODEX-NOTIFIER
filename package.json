@@ -28,14 +28,22 @@
   ],
   "activationEvents": [
     "onStartupFinished",
+    "onCommand:codexFinishNotifier.openSettingsPanel",
     "onCommand:codexFinishNotifier.notifyDone",
     "onCommand:codexFinishNotifier.testAlert",
+    "onCommand:codexFinishNotifier.selectSound",
     "onCommand:codexFinishNotifier.dismissAlert",
     "onCommand:codexFinishNotifier.markStarted"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
+      {
+        "command": "codexFinishNotifier.openSettingsPanel",
+        "title": "Open Notifier Settings",
+        "category": "Codex Notifier",
+        "icon": "$(settings-gear)"
+      },
       {
         "command": "codexFinishNotifier.notifyDone",
         "title": "Notify Codex Done",
@@ -47,6 +55,12 @@
         "title": "Test Completion Alert",
         "category": "Codex Notifier",
         "icon": "$(debug-start)"
+      },
+      {
+        "command": "codexFinishNotifier.selectSound",
+        "title": "Select Notification Sound",
+        "category": "Codex Notifier",
+        "icon": "$(file-media)"
       },
       {
         "command": "codexFinishNotifier.dismissAlert",
@@ -61,6 +75,22 @@
         "icon": "$(watch)"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "codexFinishNotifier.openSettingsPanel",
+          "group": "navigation@2",
+          "when": "resourceScheme == openai-codex"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "codexFinishNotifier.openSettingsPanel",
+          "group": "navigation@99",
+          "when": "view == chatgpt.sidebarView || view == chatgpt.sidebarSecondaryView"
+        }
+      ]
+    },
     "configuration": {
       "title": "Codex Finish Notifier",
       "properties": {
@@ -72,7 +102,19 @@
         "codexFinishNotifier.playSound": {
           "type": "boolean",
           "default": true,
-          "description": "Play the bundled notification MP3 when Codex completion is detected."
+          "description": "Play a notification sound when Codex completion is detected."
+        },
+        "codexFinishNotifier.soundVolume": {
+          "type": "number",
+          "default": 50,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Notification sound volume as a percentage. Set to 0 to mute it."
+        },
+        "codexFinishNotifier.soundPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a custom notification audio file. Leave empty to use the bundled MP3. Relative paths are resolved from the first workspace folder. You can also run 'Codex Notifier: Select Notification Sound'."
         },
         "codexFinishNotifier.flashMode": {
           "type": "string",
@@ -163,6 +205,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "test": "npm run compile && node --test test/*.test.js",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
