@@ -23,6 +23,8 @@ The OpenAI Codex VS Code extension does not expose a public VS Code extension AP
 
 Select the settings-gear button in the Codex task or sidebar title toolbar to open the quick settings panel. It provides a volume slider, notifier and sound toggles, custom audio selection/reset, a test button, and a shortcut to all extension settings.
 
+The Codex Notifier bell is also available in the VS Code Activity Bar. Click it to open the `Notification Settings` view with the volume slider, sound file picker, and a button to reset to the bundled default sound directly in the sidebar.
+
 ## Settings
 
 - `codexFinishNotifier.enabled`: turn the extension on/off.
@@ -41,7 +43,7 @@ Select the settings-gear button in the Codex task or sidebar title toolbar to op
 - `codexFinishNotifier.terminalCommandPattern`: regex for terminal commands to treat as Codex work.
 - `codexFinishNotifier.taskbarFlash`: on Windows, flash the VS Code taskbar icon while the alert is active.
 
-`workbenchColors` is the default because VS Code only exposes custom status bar background colors through `workbench.colorCustomizations`. The extension temporarily updates only `statusBar.background` and `statusBar.foreground`, then restores the previous values when dismissed. Use `off` if you want sound/taskbar flashing without the green status bar pulse.
+`workbenchColors` is the default because VS Code only exposes custom status bar background colors through `workbench.colorCustomizations`. The extension temporarily updates only `statusBar.background` and `statusBar.foreground`, then restores the previous values when dismissed. If workspace scope is selected but no workspace is open, the notifier automatically uses global scope for the temporary pulse. Use `off` if you want sound/taskbar flashing without the green status bar pulse.
 
 The notifier keeps one audio player active at a time and ignores duplicate completion signals while an alert is active. This prevents overlapping playback when terminal and Codex-log detection report the same completion.
 

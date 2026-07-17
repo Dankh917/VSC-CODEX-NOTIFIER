@@ -2,7 +2,7 @@
   "name": "codex-finish-notifier",
   "displayName": "Codex Finish Notifier",
   "description": "Play a gentle sound and flash VS Code when Codex work finishes.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "dankh917",
   "license": "MIT",
   "repository": {
@@ -88,6 +88,25 @@
           "command": "codexFinishNotifier.openSettingsPanel",
           "group": "navigation@99",
           "when": "view == chatgpt.sidebarView || view == chatgpt.sidebarSecondaryView"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexFinishNotifier",
+          "title": "Codex Notifier",
+          "icon": "media/codex-notifier.svg"
+        }
+      ]
+    },
+    "views": {
+      "codexFinishNotifier": [
+        {
+          "id": "codexFinishNotifier.settingsView",
+          "name": "Notification Settings",
+          "type": "webview",
+          "when": "true"
         }
       ]
     },
@@ -198,7 +217,7 @@
             "global"
           ],
           "default": "workspace",
-          "description": "Where temporary workbench color customizations are written when flashMode is workbenchColors."
+          "description": "Where temporary workbench color customizations are written when flashMode is workbenchColors. Workspace scope automatically falls back to global when no workspace is open."
         }
       }
     }

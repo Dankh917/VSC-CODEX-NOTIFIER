@@ -5,6 +5,7 @@ const Module = require('node:module');
 test('registers the Codex toolbar command and renders the volume panel', async () => {
   const commands = new Map();
   let createdPanel;
+  let registeredView;
   const disposable = { dispose() {} };
   const statusBar = {
     hide() {},
@@ -37,6 +38,10 @@ test('registers the Codex toolbar command and renders the volume panel', async (
       state: { focused: true },
       createOutputChannel() { return output; },
       createStatusBarItem() { return statusBar; },
+      registerWebviewViewProvider(id, provider, options) {
+        registeredView = { id, provider, options };
+        return disposable;
+      },
       createWebviewPanel(viewType, title, column, options) {
         const webview = {
           html: '',
@@ -100,11 +105,30 @@ test('registers the Codex toolbar command and renders the volume panel', async (
     assert.equal(createdPanel.viewType, 'codexFinishNotifier.settingsPanel');
     assert.match(createdPanel.webview.html, /type="range"/);
     assert.match(createdPanel.webview.html, /Choose audio/);
+    assert.match(createdPanel.webview.html, /Reset to default sound/);
     assert.match(createdPanel.webview.html, /All settings/);
+    assert.equal(registeredView.id, 'codexFinishNotifier.settingsView');
+    assert.equal(registeredView.options.webviewOptions.retainContextWhenHidden, true);
+    const sidebarWebview = {
+      html: '',
+      options: {},
+      onDidReceiveMessage() { return disposable; },
+      postMessage() { return Promise.resolve(true); }
+    };
+    registeredView.provider.resolveWebviewView({
+      webview: sidebarWebview,
+      onDidDispose() { return disposable; }
+    });
+    assert.equal(sidebarWebview.options.enableScripts, true);
+    assert.match(sidebarWebview.html, /Notification sound/);
+    assert.match(sidebarWebview.html, /type="range"/);
 
     const manifest = require('../package.json');
     assert.equal(manifest.contributes.menus['editor/title'][0].when, 'resourceScheme == openai-codex');
     assert.match(manifest.contributes.menus['view/title'][0].when, /chatgpt\.sidebarView/);
+    assert.equal(manifest.contributes.viewsContainers.activitybar[0].id, 'codexFinishNotifier');
+    assert.equal(manifest.contributes.views.codexFinishNotifier[0].id, 'codexFinishNotifier.settingsView');
+    assert.equal(manifest.contributes.views.codexFinishNotifier[0].type, 'webview');
   } finally {
     Module._load = originalLoad;
   }

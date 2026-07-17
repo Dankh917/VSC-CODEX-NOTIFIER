@@ -89,9 +89,10 @@ function activate(context) {
     statusBar.command = 'codexFinishNotifier.dismissAlert';
     statusBar.tooltip = 'Codex Finish Notifier';
     context.subscriptions.push(output, statusBar);
-    context.subscriptions.push(vscode.commands.registerCommand('codexFinishNotifier.openSettingsPanel', () => NotifierSettingsPanel.show()), vscode.commands.registerCommand('codexFinishNotifier.notifyDone', () => notifyDone('manual command')), vscode.commands.registerCommand('codexFinishNotifier.testAlert', () => notifyDone('test command')), vscode.commands.registerCommand('codexFinishNotifier.selectSound', selectCustomSound), vscode.commands.registerCommand('codexFinishNotifier.dismissAlert', () => stopAlert()), vscode.commands.registerCommand('codexFinishNotifier.markStarted', () => markStarted('manual command')), vscode.commands.registerCommand('type', onTypeCommand), vscode.window.onDidStartTerminalShellExecution(onTerminalExecutionStarted), vscode.window.onDidEndTerminalShellExecution(onTerminalExecutionEnded), vscode.window.onDidChangeActiveTextEditor(() => dismissOnInteraction('active editor changed')), vscode.window.onDidChangeTextEditorSelection(onTextEditorSelectionChanged), vscode.window.onDidChangeTextEditorVisibleRanges(() => dismissOnInteraction('editor scrolled')), vscode.window.onDidChangeActiveTerminal(() => dismissOnInteraction('active terminal changed')), vscode.workspace.onDidChangeTextDocument(onTextDocumentChanged), vscode.workspace.onDidChangeConfiguration((event) => {
+    context.subscriptions.push(vscode.commands.registerCommand('codexFinishNotifier.openSettingsPanel', () => NotifierSettingsPanel.show()), vscode.commands.registerCommand('codexFinishNotifier.notifyDone', () => notifyDone('manual command')), vscode.commands.registerCommand('codexFinishNotifier.testAlert', () => notifyDone('test command')), vscode.commands.registerCommand('codexFinishNotifier.selectSound', selectCustomSound), vscode.commands.registerCommand('codexFinishNotifier.dismissAlert', () => stopAlert()), vscode.commands.registerCommand('codexFinishNotifier.markStarted', () => markStarted('manual command')), vscode.window.registerWebviewViewProvider('codexFinishNotifier.settingsView', new NotifierSettingsViewProvider(), { webviewOptions: { retainContextWhenHidden: true } }), vscode.commands.registerCommand('type', onTypeCommand), vscode.window.onDidStartTerminalShellExecution(onTerminalExecutionStarted), vscode.window.onDidEndTerminalShellExecution(onTerminalExecutionEnded), vscode.window.onDidChangeActiveTextEditor(() => dismissOnInteraction('active editor changed')), vscode.window.onDidChangeTextEditorSelection(onTextEditorSelectionChanged), vscode.window.onDidChangeTextEditorVisibleRanges(() => dismissOnInteraction('editor scrolled')), vscode.window.onDidChangeActiveTerminal(() => dismissOnInteraction('active terminal changed')), vscode.workspace.onDidChangeTextDocument(onTextDocumentChanged), vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration(configSection)) {
             NotifierSettingsPanel.refreshActive();
+            NotifierSettingsViewProvider.refreshActive();
             refreshStatus();
             restartProcessMonitor();
             if (alertActive) {
@@ -514,8 +515,9 @@ class NotifierSettingsPanel {
     static current;
     constructor(panel) {
         this.panel = panel;
-        panel.webview.html = this.getHtml(panel.webview);
-        panel.webview.onDidReceiveMessage((message) => void this.handleMessage(message));
+        panel.webview.options = { enableScripts: true };
+        panel.webview.html = NotifierSettingsPanel.getHtml();
+        panel.webview.onDidReceiveMessage((message) => void NotifierSettingsPanel.handleMessage(message));
         panel.onDidDispose(() => {
             if (NotifierSettingsPanel.current === this) {
                 NotifierSettingsPanel.current = undefined;
@@ -535,31 +537,31 @@ class NotifierSettingsPanel {
         NotifierSettingsPanel.current?.refresh();
     }
     refresh() {
-        void this.panel.webview.postMessage({ type: 'config', config: this.getViewConfig() });
+        void this.panel.webview.postMessage({ type: 'config', config: NotifierSettingsPanel.getViewConfig() });
     }
-    async handleMessage(message) {
+    static async handleMessage(message) {
         if (!message || typeof message !== 'object' || !('type' in message)) {
             return;
         }
         const type = String(message.type);
         try {
             if (type === 'setEnabled' && 'value' in message && typeof message.value === 'boolean') {
-                await this.updateConfig('enabled', message.value);
+                await updateSettingsConfig('enabled', message.value);
             }
             else if (type === 'setPlaySound' && 'value' in message && typeof message.value === 'boolean') {
-                await this.updateConfig('playSound', message.value);
+                await updateSettingsConfig('playSound', message.value);
             }
             else if (type === 'setVolume' && 'value' in message) {
                 const volume = Number(message.value);
                 if (Number.isFinite(volume)) {
-                    await this.updateConfig('soundVolume', Math.round(clamp(volume, 0, 100)));
+                    await updateSettingsConfig('soundVolume', Math.round(clamp(volume, 0, 100)));
                 }
             }
             else if (type === 'selectSound') {
                 await selectCustomSound();
             }
             else if (type === 'resetSound') {
-                await this.updateConfig('soundPath', '');
+                await updateSettingsConfig('soundPath', '');
             }
             else if (type === 'testAlert') {
                 await notifyDone('test command');
@@ -573,12 +575,7 @@ class NotifierSettingsPanel {
             void vscode.window.showErrorMessage(`Unable to update Codex Notifier settings: ${String(error)}`);
         }
     }
-    updateConfig(key, value) {
-        return vscode.workspace
-            .getConfiguration(configSection)
-            .update(key, value, vscode.ConfigurationTarget.Global);
-    }
-    getViewConfig() {
+    static getViewConfig() {
         const cfg = getConfig();
         return {
             enabled: cfg.enabled,
@@ -588,8 +585,8 @@ class NotifierSettingsPanel {
             soundName: cfg.soundPath ? path.basename(cfg.soundPath) : 'Bundled notification'
         };
     }
-    getHtml(webview) {
-        const cfg = this.getViewConfig();
+    static getHtml() {
+        const cfg = NotifierSettingsPanel.getViewConfig();
         const nonce = (0, node_crypto_1.randomBytes)(16).toString('base64');
         return `<!DOCTYPE html>
 <html lang="en">
@@ -636,6 +633,11 @@ class NotifierSettingsPanel {
       background: var(--vscode-button-secondaryBackground);
     }
     button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    button:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+    button:disabled:hover { background: var(--vscode-button-secondaryBackground); }
     button:focus-visible, input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
     .hint { margin-top: 12px; color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.45; }
   </style>
@@ -655,7 +657,7 @@ class NotifierSettingsPanel {
     <div id="soundName" class="sound-name" title="${escapeHtml(cfg.soundPath)}">${escapeHtml(cfg.soundName)}</div>
     <div class="button-row">
       <button id="selectSound">Choose audio</button>
-      <button id="resetSound" class="secondary" ${cfg.soundPath ? '' : 'hidden'}>Use bundled</button>
+      <button id="resetSound" class="secondary" ${cfg.soundPath ? '' : 'disabled'}>Reset to default sound</button>
     </div>
   </div>
   <div class="button-row">
@@ -690,12 +692,43 @@ class NotifierSettingsPanel {
       volumeValue.textContent = config.soundVolume + '%';
       soundName.textContent = config.soundName;
       soundName.title = config.soundPath;
-      resetSound.hidden = !config.soundPath;
+      resetSound.disabled = !config.soundPath;
     });
   </script>
 </body>
 </html>`;
     }
+}
+class NotifierSettingsViewProvider {
+    static current;
+    view;
+    constructor() {
+        NotifierSettingsViewProvider.current = this;
+    }
+    resolveWebviewView(webviewView) {
+        this.view = webviewView;
+        webviewView.webview.options = { enableScripts: true };
+        webviewView.webview.html = NotifierSettingsPanel.getHtml();
+        webviewView.webview.onDidReceiveMessage((message) => {
+            void NotifierSettingsPanel.handleMessage(message);
+        });
+        webviewView.onDidDispose(() => {
+            if (NotifierSettingsViewProvider.current === this) {
+                this.view = undefined;
+            }
+        });
+    }
+    static refreshActive() {
+        const webview = NotifierSettingsViewProvider.current?.view?.webview;
+        if (webview) {
+            void webview.postMessage({ type: 'config', config: NotifierSettingsPanel.getViewConfig() });
+        }
+    }
+}
+function updateSettingsConfig(key, value) {
+    return vscode.workspace
+        .getConfiguration(configSection)
+        .update(key, value, vscode.ConfigurationTarget.Global);
 }
 function escapeHtml(value) {
     return value
@@ -1008,7 +1041,8 @@ async function applyWorkbenchPulse(step, generation) {
         return;
     }
     const cfg = getConfig();
-    const target = cfg.workbenchColorTarget === 'global'
+    const workspaceAvailable = Boolean(vscode.workspace.workspaceFile || vscode.workspace.workspaceFolders?.length);
+    const target = cfg.workbenchColorTarget === 'global' || !workspaceAvailable
         ? vscode.ConfigurationTarget.Global
         : vscode.ConfigurationTarget.Workspace;
     const configuration = vscode.workspace.getConfiguration();
